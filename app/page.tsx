@@ -2,7 +2,7 @@
 
 import type React from "react"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
@@ -70,6 +70,25 @@ export default function SSEFormatter() {
   const [isSimulating, setIsSimulating] = useState(false)
   const [simulationInterval, setSimulationInterval] = useState<NodeJS.Timeout | null>(null)
   const [isInputCollapsed, setIsInputCollapsed] = useState(false)
+
+  // 从URL参数获取content并自动解析
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search)
+    const contentParam = urlParams.get('content')
+    
+    if (contentParam) {
+      try {
+        // URL解码content参数
+        const decodedContent = decodeURIComponent(contentParam)
+        setInput(decodedContent)
+        // 自动触发解析
+        parseSSE(decodedContent)
+      } catch (error) {
+        console.error('Error decoding content parameter:', error)
+        setError('无法解码URL参数中的content内容')
+      }
+    }
+  }, [])
 
   const parseSSE = (data: string) => {
     try {
