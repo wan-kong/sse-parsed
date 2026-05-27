@@ -332,7 +332,7 @@ export default function SSEFormatter() {
     <div className="container mx-auto py-6 px-4 max-w-7xl min-h-screen flex flex-col">
       <h1 className="text-3xl font-bold mb-6 text-center">SSE Stream Formatter</h1>
 
-      <div className="flex flex-col gap-4 flex-grow">
+      <div className="flex flex-col gap-4 grow">
         {/* Input Card */}
         <Collapsible open={!isInputCollapsed} className="w-full">
           <Card className="w-full">
@@ -399,19 +399,19 @@ export default function SSEFormatter() {
         </Collapsible>
 
         {/* Output Card */}
-        <Card className="w-full flex-grow">
+        <Card className="w-full grow">
           <CardHeader>
             <CardTitle>Formatted Output</CardTitle>
             <CardDescription>Parsed SSE events will appear here</CardDescription>
           </CardHeader>
-          <CardContent className="flex-grow overflow-hidden">
+          <CardContent className="grow overflow-hidden">
             <Tabs defaultValue="pretty" className="h-full flex flex-col">
               <TabsList className="mb-4">
                 <TabsTrigger value="pretty">Pretty</TabsTrigger>
                 <TabsTrigger value="raw">Raw</TabsTrigger>
               </TabsList>
 
-              <TabsContent value="pretty" className="flex-grow overflow-auto">
+              <TabsContent value="pretty" className="grow overflow-auto">
                 {error ? (
                   <div className="text-red-500 p-4 border border-red-300 rounded-md bg-red-50">{error}</div>
                 ) : parsedEvents.length > 0 ? (
@@ -481,7 +481,7 @@ export default function SSEFormatter() {
                 )}
               </TabsContent>
 
-              <TabsContent value="raw" className="flex-grow overflow-auto">
+              <TabsContent value="raw" className="grow overflow-auto">
                 {error ? (
                   <div className="text-red-500 p-4 border border-red-300 rounded-md bg-red-50">{error}</div>
                 ) : parsedEvents.length > 0 ? (

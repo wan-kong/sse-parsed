@@ -190,17 +190,19 @@ npx vercel --prod
 ## 🎨 自定义配置
 
 ### 主题定制
-项目使用 Tailwind CSS，可以在 `tailwind.config.ts` 中自定义主题：
+项目使用 Tailwind CSS v4，可以在 `app/globals.css` 的 `@theme inline` 中自定义主题：
 
-```typescript
-module.exports = {
-  theme: {
-    extend: {
-      colors: {
-        // 自定义颜色
-      }
-    }
-  }
+```css
+@theme inline {
+  --color-brand: var(--brand);
+}
+
+:root {
+  --brand: hsl(0 0% 9%);
+}
+
+.dark {
+  --brand: hsl(0 0% 98%);
 }
 ```
 
@@ -256,4 +258,4 @@ module.exports = {
 
 ---
 
-⭐ 如果这个项目对您有帮助，请给它一个星标！ 
+⭐ 如果这个项目对您有帮助，请给它一个星标！
