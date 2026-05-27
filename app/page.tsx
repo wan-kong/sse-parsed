@@ -1,511 +1,509 @@
 "use client"
 
 import type React from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import {
+  ArrowRightIcon,
+  CheckIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
+  Code2Icon,
+  CopyIcon,
+  DownloadIcon,
+  FileUpIcon,
+  PauseIcon,
+  PlayIcon,
+  Trash2Icon,
+} from "lucide-react"
 
-import { useState, useEffect } from "react"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Button } from "@/components/ui/button"
-import { Textarea } from "@/components/ui/textarea"
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
-import { CopyIcon, DownloadIcon, UploadIcon, PlayIcon, PauseIcon, RefreshCwIcon } from "lucide-react"
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import { ChevronUpIcon, ChevronDownIcon, CodeIcon } from "lucide-react"
-import { Badge } from "@/components/ui/badge"
+type SSEEvent = {
+  event?: string
+  data?: unknown
+  _rawData?: string
+  _isParsed?: boolean
+  _isDeepParsed?: boolean
+  _parsedFields?: string[]
+  [key: string]: unknown
+}
 
-// Helper function to recursively parse JSON strings in objects
-// and track which fields were parsed
-const deepParseJSON = (obj: any): { result: any; parsedFields: string[] } => {
+type Feedback = {
+  action: "copy-all" | "download" | "copy-event" | "error"
+  message: string
+  eventIndex?: number
+}
+
+const demoEvents = [
+  'data: {"message":"Sprint planning started","count":1}\n\n',
+  'event: update\ndata: {"status":"processing","progress":33}\n\n',
+  'data: {"workshop":{"board":"Product launch","members":8}}\n\n',
+  'event: insight\ndata: {"payload":"{\\"priority\\":\\"high\\",\\"owner\\":\\"Design\\"}"}\n\n',
+  'data: {"cards":[{"title":"Interview notes"},{"title":"Next steps"}]}\n\n',
+  'event: complete\ndata: {"status":"done","progress":100}\n\n',
+]
+
+const deepParseJSON = (value: unknown): { result: unknown; parsedFields: string[] } => {
   const parsedFields: string[] = []
 
-  const parseValue = (value: any, path = ""): any => {
-    if (value === null || typeof value !== "object") {
-      // If it's a string, try to parse it as JSON
-      if (typeof value === "string") {
-        try {
-          const parsed = JSON.parse(value)
-          // If parsing succeeded and result is an object or array, add to parsedFields
-          if (parsed && typeof parsed === "object") {
-            parsedFields.push(path)
-            // Recursively parse the contents
-            const { result: deepResult, parsedFields: deepParsedFields } = deepParseJSON(parsed)
-            // Add nested parsed fields with proper path prefix
-            deepParsedFields.forEach((field) => {
-              parsedFields.push(path ? `${path}.${field}` : field)
-            })
-            return deepResult
-          }
-          return parsed
-        } catch (e) {
-          // If parsing fails, return the original string
-          return value
+  const parseValue = (item: unknown, path = ""): unknown => {
+    if (typeof item === "string") {
+      try {
+        const parsed = JSON.parse(item) as unknown
+        if (parsed !== null && typeof parsed === "object") {
+          if (path) parsedFields.push(path)
+          return parseValue(parsed, path)
         }
-      }
-      return value
-    }
-
-    // Handle arrays
-    if (Array.isArray(value)) {
-      return value.map((item, index) => parseValue(item, path ? `${path}[${index}]` : `[${index}]`))
-    }
-
-    // Handle objects
-    const result: Record<string, any> = {}
-    for (const key in value) {
-      if (Object.prototype.hasOwnProperty.call(value, key)) {
-        const newPath = path ? `${path}.${key}` : key
-        result[key] = parseValue(value[key], newPath)
+        return parsed
+      } catch {
+        return item
       }
     }
-    return result
+
+    if (Array.isArray(item)) {
+      return item.map((entry, index) => parseValue(entry, `${path}[${index}]`))
+    }
+
+    if (item !== null && typeof item === "object") {
+      return Object.fromEntries(
+        Object.entries(item).map(([key, entry]) => [key, parseValue(entry, path ? `${path}.${key}` : key)]),
+      )
+    }
+
+    return item
   }
 
-  const result = parseValue(obj)
-  return { result, parsedFields }
+  return { result: parseValue(value), parsedFields }
 }
+
+const parseEventData = (event: SSEEvent, rawData: string) => {
+  event._rawData = rawData
+
+  try {
+    const initialParsed = JSON.parse(rawData) as unknown
+    const { result, parsedFields } = deepParseJSON(initialParsed)
+    event.data = result
+    event._isParsed = true
+    event._parsedFields = parsedFields
+    event._isDeepParsed = parsedFields.length > 0
+  } catch {
+    event.data = rawData
+    event._isParsed = false
+    event._isDeepParsed = false
+    event._parsedFields = []
+  }
+}
+
+const parseSSEData = (stream: string) => {
+  const events: SSEEvent[] = []
+  let currentEvent: SSEEvent = {}
+  let currentData: string[] = []
+
+  const commitEvent = () => {
+    if (Object.keys(currentEvent).length === 0 && currentData.length === 0) return
+
+    if (currentData.length) parseEventData(currentEvent, currentData.join("\n"))
+    events.push(currentEvent)
+    currentEvent = {}
+    currentData = []
+  }
+
+  stream.split(/\r?\n/).forEach((line) => {
+    if (line === "") {
+      commitEvent()
+      return
+    }
+
+    if (line.startsWith(":")) return
+    const colonIndex = line.indexOf(":")
+    const field = colonIndex === -1 ? line : line.slice(0, colonIndex)
+    const value = colonIndex === -1 ? "" : line.slice(colonIndex + 1).replace(/^ /, "")
+
+    if (field === "data") {
+      currentData.push(value)
+    } else if (field) {
+      currentEvent[field] = value
+    }
+  })
+
+  commitEvent()
+  return events
+}
+
+const getEventType = (event: SSEEvent) => event.event || "message"
+
+const formatEventType = (eventType: string) =>
+  eventType
+    .replace(/([a-z\d])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
 
 export default function SSEFormatter() {
   const [input, setInput] = useState("")
-  const [parsedEvents, setParsedEvents] = useState<any[]>([])
+  const [parsedEvents, setParsedEvents] = useState<SSEEvent[]>([])
   const [error, setError] = useState<string | null>(null)
   const [isSimulating, setIsSimulating] = useState(false)
-  const [simulationInterval, setSimulationInterval] = useState<NodeJS.Timeout | null>(null)
   const [isInputCollapsed, setIsInputCollapsed] = useState(false)
+  const [outputView, setOutputView] = useState<"pretty" | "raw">("pretty")
+  const [eventFilter, setEventFilter] = useState("all")
+  const [feedback, setFeedback] = useState<Feedback | null>(null)
+  const simulationRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const feedbackRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // 从URL参数获取content并自动解析
+  const parseSSE = (content: string) => {
+    try {
+      setError(null)
+      setParsedEvents(parseSSEData(content))
+    } catch (parseError) {
+      console.error(parseError)
+      setError("Failed to parse SSE data. Please check the stream format.")
+    }
+  }
+
   useEffect(() => {
-    const urlParams = new URLSearchParams(window.location.search)
-    const contentParam = urlParams.get('content')
-    
-    if (contentParam) {
-      try {
-        // URL解码content参数
-        const decodedContent = decodeURIComponent(contentParam)
-        setInput(decodedContent)
-        // 自动触发解析
-        parseSSE(decodedContent)
-      } catch (error) {
-        console.error('Error decoding content parameter:', error)
-        setError('无法解码URL参数中的content内容')
-      }
+    const contentParam = new URLSearchParams(window.location.search).get("content")
+    if (!contentParam) return
+
+    try {
+      setInput(contentParam)
+      parseSSE(contentParam)
+    } catch (decodeError) {
+      console.error(decodeError)
+      setError("Unable to decode the content query parameter.")
     }
   }, [])
 
-  const parseSSE = (data: string) => {
-    try {
-      setError(null)
-      const events: any[] = []
-      const lines = data.split("\n")
-
-      let currentEvent: Record<string, any> = {}
-      let currentData = ""
-
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim()
-
-        if (line === "") {
-          // Empty line indicates the end of an event
-          if (Object.keys(currentEvent).length > 0 || currentData) {
-            try {
-              // Try to parse the data as JSON
-              if (currentData) {
-                // First attempt to parse the entire data as JSON
-                try {
-                  // Store the raw data for reference
-                  currentEvent._rawData = currentData
-
-                  // Parse the initial JSON
-                  const initialParsed = JSON.parse(currentData)
-
-                  // Deep parse any nested JSON strings and track which fields were parsed
-                  const { result: deepParsed, parsedFields } = deepParseJSON(initialParsed)
-                  currentEvent.data = deepParsed
-
-                  // Track parsing status
-                  currentEvent._isParsed = true
-
-                  // Store which fields were parsed as JSON
-                  currentEvent._parsedFields = parsedFields
-
-                  // Track if we have deeply parsed nested JSON
-                  currentEvent._isDeepParsed = parsedFields.length > 0
-                } catch (e) {
-                  // Check if this might be nested JSON with escaped quotes
-                  try {
-                    // Try to handle escaped JSON strings
-                    const unescaped = currentData.replace(/\\"/g, '"')
-                    const initialParsed = JSON.parse(unescaped)
-
-                    // Deep parse any nested JSON strings and track which fields were parsed
-                    const { result: deepParsed, parsedFields } = deepParseJSON(initialParsed)
-                    currentEvent.data = deepParsed
-
-                    currentEvent._rawData = currentData
-                    currentEvent._isParsed = true
-                    currentEvent._parsedFields = parsedFields
-                    currentEvent._isDeepParsed = parsedFields.length > 0
-                  } catch (nestedError) {
-                    // If all parsing attempts fail, keep as raw string
-                    currentEvent.data = currentData
-                    currentEvent._rawData = currentData
-                    currentEvent._isParsed = false
-                    currentEvent._isDeepParsed = false
-                    currentEvent._parsedFields = []
-                  }
-                }
-              }
-            } catch (e) {
-              // If it's not valid JSON, keep it as a string
-              if (currentData) {
-                currentEvent.data = currentData
-                currentEvent._rawData = currentData
-                currentEvent._isParsed = false
-                currentEvent._isDeepParsed = false
-                currentEvent._parsedFields = []
-              }
-            }
-
-            events.push(currentEvent)
-            currentEvent = {}
-            currentData = ""
-          }
-          continue
-        }
-
-        const colonIndex = line.indexOf(":")
-        if (colonIndex === -1) continue
-
-        const field = line.substring(0, colonIndex).trim()
-        const value = line.substring(colonIndex + 1).trim()
-
-        if (field === "data") {
-          currentData = value
-        } else {
-          currentEvent[field] = value
-        }
-      }
-
-      // Handle the last event if there's no trailing newline
-      if (Object.keys(currentEvent).length > 0 || currentData) {
-        try {
-          if (currentData) {
-            try {
-              // Store the raw data for reference
-              currentEvent._rawData = currentData
-
-              // Parse the initial JSON
-              const initialParsed = JSON.parse(currentData)
-
-              // Deep parse any nested JSON strings and track which fields were parsed
-              const { result: deepParsed, parsedFields } = deepParseJSON(initialParsed)
-              currentEvent.data = deepParsed
-
-              // Track parsing status
-              currentEvent._isParsed = true
-
-              // Store which fields were parsed as JSON
-              currentEvent._parsedFields = parsedFields
-
-              // Track if we have deeply parsed nested JSON
-              currentEvent._isDeepParsed = parsedFields.length > 0
-            } catch (e) {
-              // Try to handle escaped JSON strings
-              try {
-                const unescaped = currentData.replace(/\\"/g, '"')
-                const initialParsed = JSON.parse(unescaped)
-
-                // Deep parse any nested JSON strings and track which fields were parsed
-                const { result: deepParsed, parsedFields } = deepParseJSON(initialParsed)
-                currentEvent.data = deepParsed
-
-                currentEvent._rawData = currentData
-                currentEvent._isParsed = true
-                currentEvent._parsedFields = parsedFields
-                currentEvent._isDeepParsed = parsedFields.length > 0
-              } catch (nestedError) {
-                currentEvent.data = currentData
-                currentEvent._rawData = currentData
-                currentEvent._isParsed = false
-                currentEvent._isDeepParsed = false
-                currentEvent._parsedFields = []
-              }
-            }
-          }
-        } catch (e) {
-          if (currentData) {
-            currentEvent.data = currentData
-            currentEvent._rawData = currentData
-            currentEvent._isParsed = false
-            currentEvent._isDeepParsed = false
-            currentEvent._parsedFields = []
-          }
-        }
-        events.push(currentEvent)
-      }
-
-      setParsedEvents(events)
-    } catch (err) {
-      setError("Failed to parse SSE data. Please check the format.")
-      console.error(err)
+  useEffect(() => {
+    return () => {
+      if (simulationRef.current) clearInterval(simulationRef.current)
+      if (feedbackRef.current) clearTimeout(feedbackRef.current)
     }
+  }, [])
+
+  const deepParsedCount = useMemo(
+    () => parsedEvents.filter((event) => event._isDeepParsed).length,
+    [parsedEvents],
+  )
+  const parsedCount = useMemo(() => parsedEvents.filter((event) => event._isParsed).length, [parsedEvents])
+  const eventTypes = useMemo(
+    () => Array.from(new Set(parsedEvents.map(getEventType))),
+    [parsedEvents],
+  )
+  const visibleEvents = useMemo(
+    () =>
+      parsedEvents
+        .map((event, index) => ({ event, index }))
+        .filter(({ event }) => eventFilter === "all" || getEventType(event) === eventFilter),
+    [eventFilter, parsedEvents],
+  )
+  const exportEvents = useMemo(() => visibleEvents.map(({ event }) => event), [visibleEvents])
+
+  useEffect(() => {
+    if (eventFilter !== "all" && !eventTypes.includes(eventFilter)) setEventFilter("all")
+  }, [eventFilter, eventTypes])
+
+  const stopSimulation = () => {
+    if (simulationRef.current) {
+      clearInterval(simulationRef.current)
+      simulationRef.current = null
+    }
+    setIsSimulating(false)
   }
 
-  const handleFormat = () => {
-    parseSSE(input)
+  const simulateSSEStream = () => {
+    if (isSimulating) {
+      stopSimulation()
+      return
+    }
+
+    let count = 0
+    let stream = ""
+    setInput("")
+    setParsedEvents([])
+    setError(null)
+    setIsSimulating(true)
+
+    simulationRef.current = setInterval(() => {
+      const nextEvent = demoEvents[count]
+      if (!nextEvent) {
+        stopSimulation()
+        return
+      }
+
+      stream += nextEvent
+      setInput(stream)
+      parseSSE(stream)
+      count += 1
+    }, 700)
   }
 
   const handleClear = () => {
+    stopSimulation()
     setInput("")
     setParsedEvents([])
     setError(null)
   }
 
+  const showFeedback = (nextFeedback: Feedback) => {
+    if (feedbackRef.current) clearTimeout(feedbackRef.current)
+    setFeedback(nextFeedback)
+    feedbackRef.current = setTimeout(() => setFeedback(null), 1800)
+  }
+
+  const copyText = async (text: string, success: Feedback) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      showFeedback(success)
+    } catch {
+      showFeedback({ action: "error", message: "Copy failed" })
+    }
+  }
+
   const handleCopy = () => {
-    navigator.clipboard.writeText(JSON.stringify(parsedEvents, null, 2))
+    void copyText(JSON.stringify(exportEvents, null, 2), {
+      action: "copy-all",
+      message: `${exportEvents.length} event${exportEvents.length === 1 ? "" : "s"} copied`,
+    })
+  }
+
+  const handleCopyEvent = (event: SSEEvent, index: number) => {
+    void copyText(JSON.stringify(event, null, 2), {
+      action: "copy-event",
+      eventIndex: index,
+      message: "Copied",
+    })
   }
 
   const handleDownload = () => {
-    const blob = new Blob([JSON.stringify(parsedEvents, null, 2)], { type: "application/json" })
+    const blob = new Blob([JSON.stringify(exportEvents, null, 2)], { type: "application/json" })
     const url = URL.createObjectURL(blob)
-    const a = document.createElement("a")
-    a.href = url
-    a.download = "sse-events.json"
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
+    const link = document.createElement("a")
+    link.href = url
+    const suffix = eventFilter === "all" ? "all" : eventFilter.replace(/[^a-z\d-]+/gi, "-").toLowerCase()
+    link.download = `sse-events-${suffix}.json`
+    link.click()
     URL.revokeObjectURL(url)
+    showFeedback({
+      action: "download",
+      message: `${exportEvents.length} event${exportEvents.length === 1 ? "" : "s"} downloaded`,
+    })
   }
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
     if (!file) return
 
     const reader = new FileReader()
-    reader.onload = (event) => {
-      const content = event.target?.result as string
+    reader.onload = (loadEvent) => {
+      const content = String(loadEvent.target?.result ?? "")
       setInput(content)
       parseSSE(content)
     }
     reader.readAsText(file)
   }
 
-  const simulateSSEStream = () => {
-    if (isSimulating) {
-      if (simulationInterval) {
-        clearInterval(simulationInterval)
-        setSimulationInterval(null)
-      }
-      setIsSimulating(false)
-      return
-    }
-
-    setIsSimulating(true)
-    let count = 0
-    const events = [
-      'data: {"message": "Simple JSON event", "count": 1}\n\n',
-      'event: update\ndata: {"status": "processing", "progress": 33}\n\n',
-      'data: {"nested": {"foo": "bar", "items": [1, 2, 3]}}\n\n',
-      'event: complex\ndata: {"data": "{"nested": {"deeply": {"value": true}}}"}\n\n',
-      'data: {"config": {"settings": "{"theme": "dark", "notifications": true}"}}\n\n',
-      'data: {"results": [{"data": "{"id": 1, "name": "Item 1"}"}, {"data": "{"id": 2, "name": "Item 2"}"}]}\n\n',
-      'data: {"mixed": {"normal": "plain text", "json": "{"parsed": true, "count": 42}"}}\n\n',
-      'data: {"escaped": "This has \\"quotes\\" inside"}\n\n',
-      "data: Not valid JSON but still displayed\n\n",
-      'event: complete\ndata: {"status": "done", "progress": 100}\n\n',
-    ]
-
-    const interval = setInterval(() => {
-      if (count < events.length) {
-        setInput((prev) => prev + events[count])
-        parseSSE(input + events[count])
-        count++
-      } else {
-        clearInterval(interval)
-        setIsSimulating(false)
-        setSimulationInterval(null)
-      }
-    }, 1000)
-
-    setSimulationInterval(interval)
-  }
-
   return (
-    <div className="container mx-auto py-6 px-4 max-w-7xl min-h-screen flex flex-col">
-      <h1 className="text-3xl font-bold mb-6 text-center">SSE Stream Formatter</h1>
+    <main className="mx-auto flex min-h-dvh max-w-[1600px] flex-col px-3 py-3 md:px-6 md:pb-6 md:pt-[18px] lg:h-dvh lg:overflow-hidden">
+      <header className="mb-3 flex h-[66px] shrink-0 items-center gap-[18px] border-b border-[#eef0f3] md:mb-[18px]">
+        <div className="grid h-[42px] w-11 shrink-0 place-items-center rounded-[11px] bg-[#ffd02f] text-[#050038]" aria-hidden="true">
+          <svg className="h-[38px] w-[38px]" viewBox="0 0 44 44">
+            <path className="fill-none stroke-[#050038] stroke-[2.3] [stroke-linecap:round]" d="M15.5 14.5h15M15.5 22h11M15.5 29.5h15" />
+            <circle className="fill-[#050038]" cx="10" cy="14.5" r="2" />
+            <circle className="fill-[#050038]" cx="10" cy="22" r="2" />
+            <circle className="fill-[#4262ff]" cx="10" cy="29.5" r="2" />
+          </svg>
+        </div>
+        <div>
+          <h1 className="m-0 text-lg font-medium tracking-[-0.35px] text-[#050038] md:mb-0.5 md:text-[22px]">SSE Stream Formatter</h1>
+          <p className="m-0 hidden text-[13px] text-[#6b6f7e] md:block">Parse, inspect, and export Server-Sent Event payloads.</p>
+        </div>
+      </header>
 
-      <div className="flex flex-col gap-4 grow">
-        {/* Input Card */}
-        <Collapsible open={!isInputCollapsed} className="w-full">
-          <Card className="w-full">
-            <CardHeader className="flex flex-row items-center justify-between pb-2">
+      <section className="flex shrink-0 flex-col rounded-2xl bg-[#f7f8fa] p-3 md:rounded-[20px] md:p-5 lg:min-h-0 lg:flex-1" id="workspace">
+        <div className="mb-3.5 flex shrink-0 flex-col items-start justify-between gap-4 md:mb-[18px] md:flex-row md:items-center md:gap-6">
+          <div>
+            <h2 className="m-0 mb-0.5 text-[21px] font-medium text-[#050038]">Workspace</h2>
+            <p className="m-0 text-[13px] text-[#6b6f7e]">Input stream and parsed output</p>
+          </div>
+          <div className="flex w-full justify-stretch gap-2.5 md:w-auto" aria-label="Parsing summary">
+            <div className="flex flex-1 flex-col gap-px rounded-xl border border-[#e0e2e8] bg-white px-2.5 py-2 md:flex-none md:flex-row md:items-baseline md:gap-2 md:px-3.5 md:py-2.5">
+              <strong className="text-[23px] font-medium leading-[1.08] tracking-[-0.5px] text-[#050038] md:text-[25px]">{parsedEvents.length}</strong>
+              <span className="text-[13px] text-[#6b6f7e]">Events</span>
+            </div>
+            <div className="flex flex-1 flex-col gap-px rounded-xl border border-[#e0e2e8] bg-white px-2.5 py-2 md:flex-none md:flex-row md:items-baseline md:gap-2 md:px-3.5 md:py-2.5">
+              <strong className="text-[23px] font-medium leading-[1.08] tracking-[-0.5px] text-[#050038] md:text-[25px]">{parsedCount}</strong>
+              <span className="text-[13px] text-[#6b6f7e]">Parsed</span>
+            </div>
+            <div className="flex flex-1 flex-col gap-px rounded-xl border border-[#e0e2e8] bg-white px-2.5 py-2 md:flex-none md:flex-row md:items-baseline md:gap-2 md:px-3.5 md:py-2.5">
+              <strong className="text-[23px] font-medium leading-[1.08] tracking-[-0.5px] text-[#050038] md:text-[25px]">{deepParsedCount}</strong>
+              <span className="text-[13px] text-[#6b6f7e]">Deep fields</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-5 lg:min-h-0 lg:flex-1 lg:grid-cols-[minmax(380px,0.92fr)_minmax(460px,1.08fr)]">
+          <section className="flex h-[calc(100dvh-15rem)] min-h-[430px] flex-col overflow-hidden rounded-xl border border-[#eef0f3] bg-white p-[19px] md:p-[22px] lg:h-full lg:min-h-0">
+            <div className="flex shrink-0 items-start justify-between gap-3">
               <div>
-                <CardTitle>Input SSE Stream</CardTitle>
-                <CardDescription>
-                  Paste your SSE stream data or use the simulate button to generate sample data
-                </CardDescription>
+                <span className="text-[11px] font-semibold tracking-[0.5px] text-[#6b6f7e]">INPUT STREAM</span>
+                <h3 className="mt-[7px] text-xl font-medium text-[#050038]">Paste or upload SSE</h3>
               </div>
-              <CollapsibleTrigger asChild onClick={() => setIsInputCollapsed(!isInputCollapsed)}>
-                <Button variant="ghost" size="sm" className="w-9 p-0">
-                  {isInputCollapsed ? <ChevronDownIcon className="h-4 w-4" /> : <ChevronUpIcon className="h-4 w-4" />}
-                  <span className="sr-only">{isInputCollapsed ? "Expand" : "Collapse"}</span>
-                </Button>
-              </CollapsibleTrigger>
-            </CardHeader>
-            <CollapsibleContent>
-              <CardContent>
-                <div className="flex gap-2 mb-4">
-                  <Button onClick={simulateSSEStream} variant="outline">
-                    {isSimulating ? (
-                      <>
-                        <PauseIcon className="h-4 w-4 mr-2" /> Stop Simulation
-                      </>
-                    ) : (
-                      <>
-                        <PlayIcon className="h-4 w-4 mr-2" /> Simulate Stream
-                      </>
-                    )}
-                  </Button>
-                  <Button onClick={handleClear} variant="outline">
-                    <RefreshCwIcon className="h-4 w-4 mr-2" /> Clear
-                  </Button>
-                  <div className="relative">
-                    <input
-                      type="file"
-                      id="file-upload"
-                      className="sr-only"
-                      onChange={handleFileUpload}
-                      accept=".txt,.log,.sse"
-                    />
-                    <Button variant="outline" asChild>
-                      <label htmlFor="file-upload" className="cursor-pointer">
-                        <UploadIcon className="h-4 w-4 mr-2" /> Upload
-                      </label>
-                    </Button>
-                  </div>
+              <button
+                className="grid h-[38px] w-[38px] shrink-0 place-items-center rounded-full border border-[#e0e2e8] bg-white text-[#1c1c1e]"
+                onClick={() => setIsInputCollapsed((current) => !current)}
+                aria-label={isInputCollapsed ? "Expand input" : "Collapse input"}
+              >
+                {isInputCollapsed ? <ChevronDownIcon className="h-[17px] w-[17px]" /> : <ChevronUpIcon className="h-[17px] w-[17px]" />}
+              </button>
+            </div>
+
+            {!isInputCollapsed && (
+              <>
+                <div className="my-[18px] flex shrink-0 flex-wrap gap-2">
+                  <button className="inline-flex min-h-[42px] items-center justify-center gap-[9px] rounded-full bg-[#1c1c1e] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#2c2c34]" onClick={simulateSSEStream}>
+                    {isSimulating ? <PauseIcon className="h-4 w-4" /> : <PlayIcon className="h-4 w-4" />}
+                    {isSimulating ? "Stop replay" : "Replay demo"}
+                  </button>
+                  <label className="inline-flex min-h-[42px] cursor-pointer items-center justify-center gap-[9px] rounded-full border border-[#c7cad5] bg-white px-4 py-2.5 text-sm font-medium text-[#1c1c1e] transition-colors hover:bg-[#f7f8fa]">
+                    <FileUpIcon className="h-4 w-4" />
+                    Upload
+                    <input className="sr-only" type="file" onChange={handleFileUpload} accept=".txt,.log,.sse" />
+                  </label>
+                  <button className="inline-flex min-h-10 items-center justify-center gap-[9px] rounded-full px-3.5 py-2.5 text-sm font-medium text-[#555a6a] transition-colors hover:bg-black/[0.06]" onClick={handleClear}>
+                    <Trash2Icon className="h-4 w-4" />
+                    Clear
+                  </button>
                 </div>
-                <Textarea
+                <textarea
                   value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  placeholder="Paste SSE stream data here..."
-                  className="min-h-[200px] font-mono text-sm"
+                  onChange={(event) => setInput(event.target.value)}
+                  className="min-h-0 flex-1 resize-none overflow-auto rounded-xl border border-[#c7cad5] bg-white p-[18px] font-mono text-[13px] leading-[1.65] text-[#1c1c1e] placeholder:text-[#a5a8b5] focus:border-transparent focus:outline-2 focus:outline-[#4262ff]"
+                  placeholder={'event: message\ndata: {"message":"Hello workspace"}\n\n'}
+                  spellCheck={false}
                 />
-              </CardContent>
-              <CardFooter>
-                <Button onClick={handleFormat} className="w-full">
-                  Format SSE Data
-                </Button>
-              </CardFooter>
-            </CollapsibleContent>
-          </Card>
-        </Collapsible>
+                <button className="mt-4 inline-flex min-h-[46px] shrink-0 items-center justify-center gap-[9px] rounded-full bg-[#1c1c1e] px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-[#2c2c34]" onClick={() => parseSSE(input)}>
+                  Format SSE data <ArrowRightIcon className="h-4 w-4" />
+                </button>
+              </>
+            )}
+          </section>
 
-        {/* Output Card */}
-        <Card className="w-full grow">
-          <CardHeader>
-            <CardTitle>Formatted Output</CardTitle>
-            <CardDescription>Parsed SSE events will appear here</CardDescription>
-          </CardHeader>
-          <CardContent className="grow overflow-hidden">
-            <Tabs defaultValue="pretty" className="h-full flex flex-col">
-              <TabsList className="mb-4">
-                <TabsTrigger value="pretty">Pretty</TabsTrigger>
-                <TabsTrigger value="raw">Raw</TabsTrigger>
-              </TabsList>
+          <section className="flex h-[calc(100dvh-15rem)] min-h-[480px] flex-col overflow-hidden rounded-xl border border-[#eef0f3] bg-white pt-5 md:pt-[22px] lg:h-full lg:min-h-0" id="output">
+            <div className="flex shrink-0 items-start justify-between gap-3 px-[19px] md:px-[22px]">
+              <div>
+                <span className="text-[11px] font-semibold tracking-[0.5px] text-[#6b6f7e]">OUTPUT BOARD</span>
+                <h3 className="mt-[7px] text-xl font-medium text-[#050038]">Parsed events</h3>
+                <p
+                  className={`mt-1 min-h-[18px] text-xs ${feedback?.action === "error" ? "text-[#600000]" : "text-[#187574]"}`}
+                  aria-live="polite"
+                >
+                  {feedback?.eventIndex === undefined ? feedback?.message : ""}
+                </p>
+              </div>
+              <div className="flex flex-wrap justify-end gap-2">
+                <button className="inline-flex h-[38px] shrink-0 items-center gap-1.5 rounded-full border border-[#e0e2e8] bg-white px-3.5 text-[13px] font-medium text-[#1c1c1e] transition-colors hover:bg-[#f7f8fa] disabled:cursor-not-allowed disabled:text-[#a5a8b5]" onClick={handleCopy} disabled={!exportEvents.length} aria-label="Copy current JSON results">
+                  {feedback?.action === "copy-all" ? <CheckIcon className="h-[15px] w-[15px] text-[#187574]" /> : <CopyIcon className="h-[15px] w-[15px]" />}
+                  Copy
+                </button>
+                <button className="inline-flex h-[38px] shrink-0 items-center gap-1.5 rounded-full border border-[#e0e2e8] bg-white px-3.5 text-[13px] font-medium text-[#1c1c1e] transition-colors hover:bg-[#f7f8fa] disabled:cursor-not-allowed disabled:text-[#a5a8b5]" onClick={handleDownload} disabled={!exportEvents.length} aria-label="Download current JSON results">
+                  {feedback?.action === "download" ? <CheckIcon className="h-[15px] w-[15px] text-[#187574]" /> : <DownloadIcon className="h-[15px] w-[15px]" />}
+                  Download
+                </button>
+              </div>
+            </div>
 
-              <TabsContent value="pretty" className="grow overflow-auto">
-                {error ? (
-                  <div className="text-red-500 p-4 border border-red-300 rounded-md bg-red-50">{error}</div>
-                ) : parsedEvents.length > 0 ? (
-                  <div className="space-y-4 pb-4">
-                    {parsedEvents.map((event, index) => (
-                      <div key={index} className="border rounded-md p-4 bg-muted/30">
-                        {event.event && (
-                          <div className="mb-2">
-                            <span className="font-semibold text-sm bg-primary/10 px-2 py-1 rounded">
-                              Event: {event.event}
-                            </span>
-                          </div>
-                        )}
-                        {event.data && (
-                          <div>
-                            <div className="flex justify-between items-center mb-1">
-                              <span className="text-xs text-muted-foreground">
-                                {!event._isParsed
-                                  ? "Raw Data (parsing failed)"
-                                  : event._isDeepParsed
-                                    ? "Deeply Parsed JSON"
-                                    : "Parsed JSON"}
-                              </span>
-                            </div>
-
-                            {/* Show parsed fields if any */}
-                            {event._parsedFields && event._parsedFields.length > 0 && (
-                              <div className="mb-2 flex flex-wrap gap-1">
-                                <span className="text-xs text-muted-foreground mr-1 flex items-center">
-                                  <CodeIcon className="h-3 w-3 mr-1" /> Parsed JSON fields:
-                                </span>
-                                {event._parsedFields.map((field: string, i: number) => (
-                                  <Badge key={i} variant="outline" className="text-xs bg-primary/5">
-                                    {field}
-                                  </Badge>
-                                ))}
-                              </div>
-                            )}
-
-                            <pre className="bg-muted p-3 rounded-md overflow-auto text-sm max-h-[500px]">
-                              {event._isParsed
-                                ? JSON.stringify(event.data, null, 2)
-                                : event._rawData || String(event.data)}
-                            </pre>
-                          </div>
-                        )}
-                        {Object.entries(event)
-                          .filter(
-                            ([key]) =>
-                              !["data", "event", "_rawData", "_isParsed", "_isDeepParsed", "_parsedFields"].includes(
-                                key,
-                              ),
-                          )
-                          .map(([key, value]) => (
-                            <div key={key} className="mt-2">
-                              <span className="font-semibold">{key}: </span>
-                              <span>{String(value)}</span>
-                            </div>
-                          ))}
-                      </div>
+            <div className="mx-[19px] my-[18px] flex shrink-0 flex-col gap-3 md:mx-[22px] sm:flex-row sm:items-center sm:justify-between">
+              <div className="inline-flex gap-1 rounded-full bg-[#f7f8fa] p-1" role="tablist" aria-label="Output format">
+                <button className={`rounded-full px-[17px] py-[9px] text-[13px] font-medium ${outputView === "pretty" ? "bg-[#1c1c1e] text-white" : "text-[#6b6f7e]"}`} onClick={() => setOutputView("pretty")} role="tab">
+                  Pretty board
+                </button>
+                <button className={`rounded-full px-[17px] py-[9px] text-[13px] font-medium ${outputView === "raw" ? "bg-[#1c1c1e] text-white" : "text-[#6b6f7e]"}`} onClick={() => setOutputView("raw")} role="tab">
+                  Raw JSON
+                </button>
+              </div>
+              {eventTypes.length > 0 && (
+                <div className="relative w-full sm:w-[190px]">
+                  <select
+                    className="h-10 w-full appearance-none rounded-full border border-[#e0e2e8] bg-white py-2 pl-4 pr-10 text-sm text-[#1c1c1e] outline-none focus:border-[#4262ff] focus:ring-1 focus:ring-[#4262ff]"
+                    value={eventFilter}
+                    onChange={(event) => setEventFilter(event.target.value)}
+                    aria-label="Filter event type"
+                  >
+                    <option value="all">All events ({parsedEvents.length})</option>
+                    {eventTypes.map((eventType) => (
+                      <option key={eventType} value={eventType}>
+                        {formatEventType(eventType)}
+                      </option>
                     ))}
-                  </div>
-                ) : (
-                  <div className="text-center text-muted-foreground p-8">
-                    No events to display. Format your SSE data to see results.
-                  </div>
-                )}
-              </TabsContent>
+                  </select>
+                  <ChevronDownIcon className="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#6b6f7e]" />
+                </div>
+              )}
+            </div>
 
-              <TabsContent value="raw" className="grow overflow-auto">
-                {error ? (
-                  <div className="text-red-500 p-4 border border-red-300 rounded-md bg-red-50">{error}</div>
-                ) : parsedEvents.length > 0 ? (
-                  <pre className="bg-muted p-4 rounded-md overflow-auto text-sm max-h-[600px]">
-                    {JSON.stringify(parsedEvents, null, 2)}
-                  </pre>
+            <div className="min-h-0 flex-1 overflow-auto px-[19px] pb-[19px] md:px-[22px] md:pb-[22px]">
+              {error ? (
+                <div className="rounded-xl border border-[#e3c5c5] bg-[#fbd4d4] p-[18px] text-sm text-[#600000]">{error}</div>
+              ) : parsedEvents.length === 0 ? (
+                <div className="flex h-full min-h-[260px] flex-col items-center justify-center text-center text-[#6b6f7e]">
+                  <Code2Icon className="mb-[17px] h-[33px] w-[33px] text-[#4262ff]" />
+                  <h4 className="mb-1.5 text-xl font-medium text-[#1c1c1e]">Your board is empty</h4>
+                  <p className="m-0 max-w-[280px] text-sm leading-6">Replay the demo or format a stream to see parsed cards here.</p>
+                </div>
+              ) : outputView === "raw" ? (
+                <pre className="m-0 overflow-auto rounded-[9px] border border-[#eef0f3] bg-[#f7f8fa] p-[13px] font-mono text-[12.5px] leading-[1.6] text-[#050038]">{JSON.stringify(exportEvents, null, 2)}</pre>
                 ) : (
-                  <div className="text-center text-muted-foreground p-8">
-                    No events to display. Format your SSE data to see results.
-                  </div>
-                )}
-              </TabsContent>
-            </Tabs>
-          </CardContent>
-          <CardFooter className="flex justify-end gap-2">
-            <Button onClick={handleCopy} variant="outline" disabled={parsedEvents.length === 0}>
-              <CopyIcon className="h-4 w-4 mr-2" /> Copy JSON
-            </Button>
-            <Button onClick={handleDownload} variant="outline" disabled={parsedEvents.length === 0}>
-              <DownloadIcon className="h-4 w-4 mr-2" /> Download
-            </Button>
-          </CardFooter>
-        </Card>
-      </div>
-    </div>
+                  <div className="flex flex-col gap-3">
+                    {visibleEvents.length === 0 ? (
+                      <p className="py-12 text-center text-sm text-[#6b6f7e]">No events match this filter.</p>
+                    ) : visibleEvents.map(({ event, index }) => {
+                      const eventType = getEventType(event)
+                      return (
+                    <article className="rounded-xl border border-[#eef0f3] bg-white p-[18px]" key={`${eventType}-${index}`}>
+                      <div className="mb-[13px] flex flex-wrap items-center gap-2.5 text-sm">
+                        <span className="text-xs text-[#6b6f7e]">{String(index + 1).padStart(2, "0")}</span>
+                        <strong className="font-medium text-[#1c1c1e]">{formatEventType(eventType)}</strong>
+                        {event.event && event.event !== formatEventType(eventType) && (
+                          <code className="hidden rounded bg-[#f7f8fa] px-1.5 py-0.5 text-[11px] text-[#6b6f7e] sm:inline">{event.event}</code>
+                        )}
+                        <button
+                          className="ml-auto inline-flex h-7 items-center gap-1 rounded-full border border-[#e0e2e8] bg-white px-2.5 text-xs font-medium text-[#555a6a] transition-colors hover:bg-[#f7f8fa] hover:text-[#1c1c1e]"
+                          onClick={() => handleCopyEvent(event, index)}
+                          aria-label={`Copy ${formatEventType(eventType)} event ${index + 1}`}
+                        >
+                          {feedback?.action === "copy-event" && feedback.eventIndex === index ? (
+                            <>
+                              <CheckIcon className="h-3.5 w-3.5 text-[#187574]" />
+                              Copied
+                            </>
+                          ) : (
+                            <>
+                              <CopyIcon className="h-3.5 w-3.5" />
+                              Copy
+                            </>
+                          )}
+                        </button>
+                        <span className={`rounded-full bg-[#f7f8fa] px-[9px] py-1 text-[11px] font-semibold ${event._isParsed ? "text-[#187574]" : "text-[#600000]"}`}>
+                          {event._isDeepParsed ? "Deep JSON" : event._isParsed ? "JSON" : "Raw"}
+                        </span>
+                      </div>
+                      {!!event._parsedFields?.length && (
+                        <div className="mb-2.5 flex flex-wrap items-center gap-[5px] text-[#6b6f7e]">
+                          <Code2Icon className="mr-0.5 h-[13px] w-[13px]" />
+                          {event._parsedFields.map((field) => (
+                            <span className="rounded-full bg-[#f7f8fa] px-2 py-[3px] text-[11px]" key={field}>{field}</span>
+                          ))}
+                        </div>
+                      )}
+                      <pre className="m-0 overflow-auto rounded-[9px] border border-[#eef0f3] bg-[#f7f8fa] p-[13px] font-mono text-[12.5px] leading-[1.6] text-[#050038]">{event._isParsed ? JSON.stringify(event.data, null, 2) : event._rawData}</pre>
+                    </article>
+                      )
+                    })}
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
   )
 }
